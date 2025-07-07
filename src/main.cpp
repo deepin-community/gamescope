@@ -70,6 +70,7 @@ const struct option *gamescope_options = (struct option[]){
 	{ "expose-wayland", no_argument, 0 },
 	{ "mouse-sensitivity", required_argument, nullptr, 's' },
 	{ "mangoapp", no_argument, nullptr, 0 },
+	{ "adaptive-sync", no_argument, nullptr, 0 },
 
 	{ "backend", required_argument, nullptr, 0 },
 
@@ -88,12 +89,12 @@ const struct option *gamescope_options = (struct option[]){
 	{ "default-touch-mode", required_argument, nullptr, 0 },
 	{ "generate-drm-mode", required_argument, nullptr, 0 },
 	{ "immediate-flips", no_argument, nullptr, 0 },
-	{ "adaptive-sync", no_argument, nullptr, 0 },
 	{ "framerate-limit", required_argument, nullptr, 0 },
 
 	// openvr options
 #if HAVE_OPENVR
 	{ "vr-overlay-key", required_argument, nullptr, 0 },
+	{ "vr-app-overlay-key", required_argument, nullptr, 0 },
 	{ "vr-overlay-explicit-name", required_argument, nullptr, 0 },
 	{ "vr-overlay-default-name", required_argument, nullptr, 0 },
 	{ "vr-overlay-icon", required_argument, nullptr, 0 },
@@ -101,11 +102,13 @@ const struct option *gamescope_options = (struct option[]){
 	{ "vr-overlay-enable-control-bar", no_argument, nullptr, 0 },
 	{ "vr-overlay-enable-control-bar-keyboard", no_argument, nullptr, 0 },
 	{ "vr-overlay-enable-control-bar-close", no_argument, nullptr, 0 },
+	{ "vr-overlay-enable-click-stabilization", no_argument, nullptr, 0 },
 	{ "vr-overlay-modal", no_argument, nullptr, 0 },
 	{ "vr-overlay-physical-width", required_argument, nullptr, 0 },
 	{ "vr-overlay-physical-curvature", required_argument, nullptr, 0 },
 	{ "vr-overlay-physical-pre-curve-pitch", required_argument, nullptr, 0 },
 	{ "vr-scroll-speed", required_argument, nullptr, 0 },
+	{ "vr-session-manager", no_argument, nullptr, 0 },
 #endif
 
 	// wlserver options
@@ -115,6 +118,7 @@ const struct option *gamescope_options = (struct option[]){
 	{ "cursor", required_argument, nullptr, 0 },
 	{ "cursor-hotspot", required_argument, nullptr, 0 },
 	{ "cursor-scale-height", required_argument, nullptr, 0 },
+	{ "virtual-connector-strategy", required_argument, nullptr, 0 },
 	{ "ready-fd", required_argument, nullptr, 'R' },
 	{ "stats-path", required_argument, nullptr, 'T' },
 	{ "hide-cursor-delay", required_argument, nullptr, 'C' },
@@ -192,6 +196,7 @@ const char usage[] =
 	"  --force-orientation            rotate the internal display (left, right, normal, upsidedown)\n"
 	"  --force-windows-fullscreen     force windows inside of gamescope to be the size of the nested display (fullscreen)\n"
 	"  --cursor-scale-height          if specified, sets a base output height to linearly scale the cursor against.\n"
+	"  --virtual-connector-strategy   Specifies how we should make virtual connectors.\n"
 	"  --hdr-enabled                  enable HDR output (needs Gamescope WSI layer enabled for support from clients)\n"
 	"                                 If this is not set, and there is a HDR client, it will be tonemapped SDR.\n"
 	"  --sdr-gamut-wideness           Set the 'wideness' of the gamut for SDR comment. 0 - 1.\n"
@@ -203,6 +208,7 @@ const char usage[] =
 	"                                 Default: 1000 nits, Max: 10000 nits\n"
 	"  --framerate-limit              Set a simple framerate limit. Used as a divisor of the refresh rate, rounds down eg 60 / 59 -> 60fps, 60 / 25 -> 30fps. Default: 0, disabled.\n"
 	"  --mangoapp                     Launch with the mangoapp (mangohud) performance overlay enabled. You should use this instead of using mangohud on the game or gamescope.\n"
+	"  --adaptive-sync                Enable adaptive sync if available (variable rate refresh)\n"
 	"\n"
 	"Nested mode options:\n"
 	"  -o, --nested-unfocused-refresh game refresh rate when unfocused\n"
@@ -213,15 +219,15 @@ const char usage[] =
 	"  --display-index                forces gamescope to use a specific display in nested mode."
 	"\n"
 	"Embedded mode options:\n"
-	"  -O, --prefer-output            list of connectors in order of preference\n"
+	"  -O, --prefer-output            list of connectors in order of preference (ex: DP-1,DP-2,DP-3,HDMI-A-1)\n"
 	"  --default-touch-mode           0: hover, 1: left, 2: right, 3: middle, 4: passthrough\n"
 	"  --generate-drm-mode            DRM mode generation algorithm (cvt, fixed)\n"
 	"  --immediate-flips              Enable immediate flips, may result in tearing\n"
-	"  --adaptive-sync                Enable adaptive sync if available (variable rate refresh)\n"
 	"\n"
 #if HAVE_OPENVR
 	"VR mode options:\n"
 	"  --vr-overlay-key                         Sets the SteamVR overlay key to this string\n"
+	"  --vr-app-overlay-key						Sets the SteamVR overlay key to use for child apps\n"
 	"  --vr-overlay-explicit-name               Force the SteamVR overlay name to always be this string\n"
 	"  --vr-overlay-default-name                Sets the fallback SteamVR overlay name when there is no window title\n"
 	"  --vr-overlay-icon                        Sets the SteamVR overlay icon to this file\n"
@@ -229,6 +235,7 @@ const char usage[] =
 	"  --vr-overlay-enable-control-bar          Enables the SteamVR control bar\n"
 	"  --vr-overlay-enable-control-bar-keyboard Enables the SteamVR keyboard button on the control bar\n"
 	"  --vr-overlay-enable-control-bar-close    Enables the SteamVR close button on the control bar\n"
+	"  --vr-overlay-enable-click-stabilization  Enables the SteamVR click stabilization\n"
 	"  --vr-overlay-modal                       Makes our VR overlay appear as a modal\n"
 	"  --vr-overlay-physical-width              Sets the physical width of our VR overlay in metres\n"
 	"  --vr-overlay-physical-curvature          Sets the curvature of our VR overlay\n"
@@ -421,6 +428,34 @@ static enum gamescope::GamescopeBackend parse_backend_name(const char *str)
 		return gamescope::GamescopeBackend::Wayland;
 	} else {
 		fprintf( stderr, "gamescope: invalid value for --backend\n" );
+		exit(1);
+	}
+}
+
+static int parse_integer(const char *str, const char *optionName)
+{
+	auto result = gamescope::Parse<int>(str);
+	if ( result.has_value() )
+	{
+		return result.value();
+	}
+	else
+	{
+		fprintf( stderr, "gamescope: invalid value for --%s, \"%s\" is either not an integer or is far too large\n", optionName, str );
+		exit(1);
+	}
+}
+
+static float parse_float(const char *str, const char *optionName)
+{
+	auto result = gamescope::Parse<float>(str);
+	if ( result.has_value() )
+	{
+		return result.value();
+	}
+	else
+	{
+		fprintf( stderr, "gamescope: invalid value for --%s, \"%s\" could not be interpreted as a real number\n", optionName, str );
 		exit(1);
 	}
 }
@@ -677,25 +712,25 @@ int main(int argc, char **argv)
 		const char *opt_name;
 		switch (o) {
 			case 'w':
-				g_nNestedWidth = atoi( optarg );
+				g_nNestedWidth = parse_integer( optarg, "nested-width" );
 				break;
 			case 'h':
-				g_nNestedHeight = atoi( optarg );
+				g_nNestedHeight = parse_integer( optarg, "nested-height" );
 				break;
 			case 'r':
-				g_nNestedRefresh = gamescope::ConvertHztomHz( atoi( optarg ) );
+				g_nNestedRefresh = gamescope::ConvertHztomHz( parse_integer( optarg, "nested-refresh" ) );
 				break;
 			case 'W':
-				g_nPreferredOutputWidth = atoi( optarg );
+				g_nPreferredOutputWidth = parse_integer( optarg, "output-width" );
 				break;
 			case 'H':
-				g_nPreferredOutputHeight = atoi( optarg );
+				g_nPreferredOutputHeight = parse_integer( optarg, "output-height" );
 				break;
 			case 'o':
-				g_nNestedUnfocusedRefresh = gamescope::ConvertHztomHz( atoi( optarg ) );
+				g_nNestedUnfocusedRefresh = gamescope::ConvertHztomHz( parse_integer( optarg, "nested-unfocused-refresh" ) );
 				break;
 			case 'm':
-				g_flMaxWindowScale = atof( optarg );
+				g_flMaxWindowScale = parse_float( optarg, "max-scale" );
 				break;
 			case 'S':
 				g_wantedUpscaleScaler = parse_upscaler_scaler(optarg);
@@ -716,10 +751,12 @@ int main(int argc, char **argv)
 				g_bGrabbed = true;
 				break;
 			case 's':
-				g_mouseSensitivity = atof( optarg );
+				g_mouseSensitivity = parse_float( optarg, "mouse-sensitivity" );
 				break;
 			case 'e':
 				steamMode = true;
+				if ( gamescope::cv_backend_virtual_connector_strategy == gamescope::VirtualConnectorStrategies::SingleApplication )
+					gamescope::cv_backend_virtual_connector_strategy = gamescope::VirtualConnectorStrategies::SteamControlled;
 				break;
 			case 0: // long options without a short option
 				opt_name = gamescope_options[opt_index].name;
@@ -734,21 +771,21 @@ int main(int argc, char **argv)
 				} else if (strcmp(opt_name, "disable-color-management") == 0) {
 					g_bForceDisableColorMgmt = true;
 				} else if (strcmp(opt_name, "xwayland-count") == 0) {
-					g_nXWaylandCount = atoi( optarg );
+					g_nXWaylandCount = parse_integer( optarg, opt_name );
 				} else if (strcmp(opt_name, "composite-debug") == 0) {
 					cv_composite_debug |= CompositeDebugFlag::Markers;
 					cv_composite_debug |= CompositeDebugFlag::PlaneBorders;
 				} else if (strcmp(opt_name, "hdr-debug-heatmap") == 0) {
 					cv_composite_debug |= CompositeDebugFlag::Heatmap;
 				} else if (strcmp(opt_name, "default-touch-mode") == 0) {
-					gamescope::cv_touch_click_mode = (gamescope::TouchClickMode) atoi( optarg );
+					gamescope::cv_touch_click_mode = (gamescope::TouchClickMode) parse_integer( optarg, opt_name );
 				} else if (strcmp(opt_name, "generate-drm-mode") == 0) {
 					g_eGamescopeModeGeneration = parse_gamescope_mode_generation( optarg );
 				} else if (strcmp(opt_name, "force-orientation") == 0) {
 					g_DesiredInternalOrientation = force_orientation( optarg );
 				} else if (strcmp(opt_name, "sharpness") == 0 ||
 						   strcmp(opt_name, "fsr-sharpness") == 0) {
-					g_upscaleFilterSharpness = atoi( optarg );
+					g_upscaleFilterSharpness = parse_integer( optarg, opt_name );
 				} else if (strcmp(opt_name, "rt") == 0) {
 					g_bRt = true;
 				} else if (strcmp(opt_name, "prefer-vk-device") == 0) {
@@ -762,7 +799,7 @@ int main(int argc, char **argv)
 				} else if (strcmp(opt_name, "force-grab-cursor") == 0) {
 					g_bForceRelativeMouse = true;
 				} else if (strcmp(opt_name, "display-index") == 0) {
-					g_nNestedDisplayIndex = atoi( optarg );
+					g_nNestedDisplayIndex = parse_integer( optarg, opt_name );
 				} else if (strcmp(opt_name, "adaptive-sync") == 0) {
 					cv_adaptive_sync = true;
 				} else if (strcmp(opt_name, "expose-wayland") == 0) {
@@ -770,9 +807,20 @@ int main(int argc, char **argv)
 				} else if (strcmp(opt_name, "backend") == 0) {
 					eCurrentBackend = parse_backend_name( optarg );
 				} else if (strcmp(opt_name, "cursor-scale-height") == 0) {
-					g_nCursorScaleHeight = atoi(optarg);
+					g_nCursorScaleHeight = parse_integer(optarg, opt_name);
 				} else if (strcmp(opt_name, "mangoapp") == 0) {
 					g_bLaunchMangoapp = true;
+				} else if (strcmp(opt_name, "virtual-connector-strategy") == 0) {
+					for ( uint32_t i = 0; i < gamescope::VirtualConnectorStrategies::Count; i++ )
+					{
+						gamescope::VirtualConnectorStrategy eStrategy =
+							static_cast<gamescope::VirtualConnectorStrategy>( i );
+						if ( optarg == gamescope::VirtualConnectorStrategyToString( eStrategy ) )
+						{
+							gamescope::cv_backend_virtual_connector_strategy = eStrategy;
+								
+						}
+					}
 				}
 				break;
 			case '?':

@@ -5,3 +5,4 @@
 0005_add_reshade_696b14c.patch
 0006_use_system_wlroots-0.18-headers.patch
 0007_fix_build.patch
+0008_deepin-desuger_std20_format.patch

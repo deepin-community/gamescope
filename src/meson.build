@@ -13,15 +13,15 @@ dep_xi = dependency('xi')
 drm_dep = dependency('libdrm', version: '>= 2.4.113', required: get_option('drm_backend'))
 eis_dep = dependency('libeis-1.0', required : get_option('input_emulation'))
 
+libsystemd_dep = dependency('libsystemd', required : false)
+
 wayland_server = dependency('wayland-server', version: '>=1.21')
 wayland_protos = dependency('wayland-protocols', version: '>=1.17')
 xkbcommon = dependency('xkbcommon')
 thread_dep = dependency('threads')
 cap_dep = dependency('libcap', required: get_option('rt_cap'))
 epoll_dep = dependency('epoll-shim', required: false)
-glm_dep = dependency('glm')
 sdl2_dep = dependency('SDL2', required: get_option('sdl2_backend'))
-stb_dep = dependency('stb')
 avif_dep = dependency('libavif', version: '>=1.0.0', required: get_option('avif_screenshots'))
 
 wlroots_dep = dependency(
@@ -119,9 +119,11 @@ src = [
   'backend.cpp',
   'x11cursor.cpp',
   'InputEmulation.cpp',
+  'LibInputHandler.cpp',
 ]
 
 luajit_dep = dependency( 'luajit' )
+libinput_dep = dependency('libinput', required: true)
 
 gamescope_cpp_args = []
 if drm_dep.found()
@@ -147,6 +149,7 @@ gamescope_cpp_args += '-DHAVE_SDL2=@0@'.format(sdl2_dep.found().to_int())
 gamescope_cpp_args += '-DHAVE_AVIF=@0@'.format(avif_dep.found().to_int())
 gamescope_cpp_args += '-DHAVE_LIBCAP=@0@'.format(cap_dep.found().to_int())
 gamescope_cpp_args += '-DHAVE_LIBEIS=@0@'.format(eis_dep.found().to_int())
+gamescope_cpp_args += '-DHAVE_LIBSYSTEMD=@0@'.format(libsystemd_dep.found().to_int())
 gamescope_cpp_args += '-DHAVE_SCRIPTING=1'
 
 src += spirv_shaders
@@ -194,7 +197,7 @@ gamescope_version = configure_file(
       xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
       vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
       stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi,
-      libdecor_dep, eis_dep, luajit_dep
+      libdecor_dep, eis_dep, luajit_dep, libinput_dep, libsystemd_dep,
     ],
     install: true,
     cpp_args: gamescope_cpp_args,
@@ -219,3 +222,5 @@ executable('gamescope_color_microbench', ['color_bench.cpp', 'color_helpers.cpp'
 executable('gamescope_color_tests', ['color_tests.cpp', 'color_helpers.cpp'], gamescope_core_src, gamescope_version, dependencies:[glm_dep])
 
 executable('gamescopectl', ['Apps/gamescopectl.cpp'], gamescope_core_src, gamescope_version, protocols_client_src, dependencies: [dep_wayland], install:true )
+
+executable('gamescope_hotkey_example', ['Apps/gamescope_hotkey_example.cpp'], gamescope_core_src, gamescope_version, protocols_client_src, dependencies: [dep_wayland, xkbcommon], install: false )

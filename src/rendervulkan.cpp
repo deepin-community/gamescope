@@ -163,6 +163,7 @@ Target *pNextFind(const Base *base, VkStructureType sType)
 }
 
 #define VK_STRUCTURE_TYPE_WSI_IMAGE_CREATE_INFO_MESA (VkStructureType)1000001002
+#define VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA (VkStructureType)1000001003
 
 struct wsi_image_create_info {
 	VkStructureType sType;
@@ -173,6 +174,11 @@ struct wsi_image_create_info {
 	const uint64_t *modifiers;
 };
 
+struct wsi_memory_allocate_info {
+    VkStructureType sType;
+    const void *pNext;
+    bool implicit_sync;
+};
 
 // DRM doesn't have 32bit floating point formats, so add our own
 #define DRM_FORMAT_ABGR32323232F fourcc_code('A', 'B', '8', 'F')
@@ -1560,8 +1566,8 @@ void CVulkanCmdBuffer::uploadConstants(Args&&... args)
 {
 	PushData data(std::forward<Args>(args)...);
 
-	void *ptr = m_device->uploadBufferData(sizeof(data));
-	m_renderBufferOffset = m_device->m_uploadBufferOffset - sizeof(data);
+	auto [ptr, offset] = m_device->uploadBufferData(sizeof(data));
+	m_renderBufferOffset = offset;
 	memcpy(ptr, &data, sizeof(data));
 }
 
@@ -2059,7 +2065,7 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 		assert( drmFormat == pDMA->format );
 	}
 
-	if ( GetBackend()->UsesModifiers() && g_device.supportsModifiers() && pDMA && pDMA->modifier != DRM_FORMAT_MOD_INVALID )
+	if ( g_device.supportsModifiers() && pDMA && pDMA->modifier != DRM_FORMAT_MOD_INVALID )
 	{
 		VkExternalImageFormatProperties externalImageProperties = {
 			.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
@@ -2215,6 +2221,15 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 		VkImportMemoryFdInfoKHR importMemoryInfo = {};
 		VkExportMemoryAllocateInfo memory_export_info = {};
 		VkMemoryDedicatedAllocateInfo memory_dedicated_info = {};
+		struct wsi_memory_allocate_info memory_wsi_info = {};
+
+		if ( flags.bFlippable == true )
+		{
+			memory_wsi_info = {
+				.sType = VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA,
+				.pNext = std::exchange(allocInfo.pNext, &memory_wsi_info),
+			};
+		}
 
 		if ( flags.bExportable == true || pDMA != nullptr )
 		{
@@ -2781,14 +2796,14 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
 			uint64_t modifier = modifierProps[j].drmFormatModifier;
 
 			if ( !is_image_format_modifier_supported( format, drmFormat, modifier ) )
-			continue;
+				continue;
 
 			if ( ( modifierProps[j].drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT ) == 0 )
 			{
 				continue;
 			}
 
-			if ( !gamescope::Algorithm::Contains( GetBackend()->GetSupportedModifiers( drmFormat ), modifier ) )
+			if ( GetBackend()->UsesModifiers() && !gamescope::Algorithm::Contains( GetBackend()->GetSupportedModifiers( drmFormat ), modifier ) )
 				continue;
 
 			wlr_drm_format_set_add( &sampledDRMFormats, drmFormat, modifier );
@@ -2799,7 +2814,7 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
 	}
 	else
 	{
-		if ( !GetBackend()->SupportsFormat( drmFormat ) )
+		if ( GetBackend()->UsesModifiers() && !GetBackend()->SupportsFormat( drmFormat ) )
 			return false;
 
 		wlr_drm_format_set_add( &sampledDRMFormats, drmFormat, DRM_FORMAT_MOD_INVALID );
@@ -2994,7 +3009,7 @@ void vulkan_update_luts(const gamescope::Rc<CVulkanTexture>& lut1d, const gamesc
 	size_t lut1d_size = lut1d->width() * sizeof(uint16_t) * 4;
 	size_t lut3d_size = lut3d->width() * lut3d->height() * lut3d->depth() * sizeof(uint16_t) * 4;
 
-	void* base_dst = g_device.uploadBufferData(lut1d_size + lut3d_size);
+	auto [base_dst, base_offset] = g_device.uploadBufferData(lut1d_size + lut3d_size);
 
 	void* lut1d_dst = base_dst;
 	void *lut3d_dst = ((uint8_t*)base_dst) + lut1d_size;
@@ -3002,8 +3017,8 @@ void vulkan_update_luts(const gamescope::Rc<CVulkanTexture>& lut1d, const gamesc
 	memcpy(lut3d_dst, lut3d_data, lut3d_size);
 
 	auto cmdBuffer = g_device.commandBuffer();
-	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), 0, 0, lut1d);
-	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), lut1d_size, 0, lut3d);
+	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), base_offset, 0, lut1d);
+	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), base_offset + lut1d_size, 0, lut3d);
 	g_device.submit(std::move(cmdBuffer));
 	g_device.waitIdle(); // TODO: Sync this better
 }
@@ -3024,7 +3039,8 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_flat_texture( uint32_t width, 
 	bool bRes = texture->BInit( width, height, 1u, VulkanFormatToDRM( VK_FORMAT_B8G8R8A8_UNORM ), flags );
 	assert( bRes );
 
-	uint8_t* dst = (uint8_t *)g_device.uploadBufferData( width * height * 4 );
+	auto [_dst, offset] = g_device.uploadBufferData( width * height * 4 );
+	uint8_t *dst = (uint8_t *)_dst;
 	for ( uint32_t i = 0; i < width * height * 4; i += 4 )
 	{
 		dst[i + 0] = b;
@@ -3034,7 +3050,7 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_flat_texture( uint32_t width, 
 	}
 
 	auto cmdBuffer = g_device.commandBuffer();
-	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), 0, 0, texture.get());
+	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), offset, 0, texture.get());
 	g_device.submit(std::move(cmdBuffer));
 	g_device.waitIdle();
 
@@ -3500,11 +3516,12 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_bits( uint32_t wi
 		return nullptr;
 
 	size_t size = width * height * DRMFormatGetBPP(drmFormat);
-	memcpy( g_device.uploadBufferData(size), bits, size );
+	auto [ dst, offset ] = g_device.uploadBufferData(size);
+	memcpy( dst, bits, size );
 
 	auto cmdBuffer = g_device.commandBuffer();
 
-	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), 0, 0, pTex.get());
+	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), offset, 0, pTex.get());
 	// TODO: Sync this copyBufferToImage.
 
 	g_device.submit(std::move(cmdBuffer));
@@ -3574,6 +3591,7 @@ struct BlitPushData_t
 	uint32_t blurRadius;
 
 	uint32_t u_shaderFilter;
+	uint32_t u_alphaMode;
 
     float u_linearToNits; // unset
     float u_nitsToLinear; // unset
@@ -3583,6 +3601,7 @@ struct BlitPushData_t
 	explicit BlitPushData_t(const struct FrameInfo_t *frameInfo)
 	{
 		u_shaderFilter = 0;
+		u_alphaMode = 0;
 
 		for (int i = 0; i < frameInfo->layerCount; i++) {
 			const FrameInfo_t::Layer_t *layer = &frameInfo->layers[i];
@@ -3593,6 +3612,8 @@ struct BlitPushData_t
                 u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::FROM_VIEW) << (i * 4);
             else
                 u_shaderFilter |= ((uint32_t)layer->filter) << (i * 4);
+
+			u_alphaMode |= ((uint32_t)layer->eAlphaBlendingMode) << ( i * 4 );
 
 			if (layer->ctm)
 			{
@@ -3624,6 +3645,7 @@ struct BlitPushData_t
 		offset[0] = { 0.5f, 0.5f };
 		opacity[0] = 1.0f;
         u_shaderFilter = (uint32_t)GamescopeUpscaleFilter::LINEAR;
+		u_alphaMode = 0;
 		ctm[0] = glm::mat3x4
 		{
 			1, 0, 0, 0,
@@ -3703,6 +3725,7 @@ struct RcasPushData_t
 	uint32_t u_c1;
 
 	uint32_t u_shaderFilter;
+	uint32_t u_alphaMode;
 
     float u_linearToNits; // unset
     float u_nitsToLinear; // unset
@@ -3719,6 +3742,7 @@ struct RcasPushData_t
 		u_frameId = s_frameId++;
 		u_c1 = tmp.x;
 		u_shaderFilter = 0;
+		u_alphaMode = 0;
 
 		for (int i = 0; i < frameInfo->layerCount; i++)
 		{
@@ -3728,6 +3752,8 @@ struct RcasPushData_t
                 u_shaderFilter |= ((uint32_t)GamescopeUpscaleFilter::FROM_VIEW) << (i * 4);
             else
                 u_shaderFilter |= ((uint32_t)layer->filter) << (i * 4);
+
+			u_alphaMode |= ((uint32_t)layer->eAlphaBlendingMode) << ( i * 4 );
 
 			if (layer->ctm)
 			{
@@ -3856,12 +3882,15 @@ std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo, 
 extern std::string g_reshade_effect;
 extern uint32_t g_reshade_technique_idx;
 
+ReshadeEffectPipeline *g_pLastReshadeEffect = nullptr;
+
 std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pPipewireTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride, bool increment, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer )
 {
 	EOTF outputTF = frameInfo->outputEncodingEOTF;
 	if (!frameInfo->applyOutputColorMgmt)
 		outputTF = EOTF_Count; //Disable blending stuff.
 
+	g_pLastReshadeEffect = nullptr;
 	if (!g_reshade_effect.empty())
 	{
 		if (frameInfo->layers[0].tex)
@@ -3877,6 +3906,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 			};
 
 			ReshadeEffectPipeline* pipeline = g_reshadeManager.pipeline(key);
+			g_pLastReshadeEffect = pipeline;
+
 			if (pipeline != nullptr)
 			{
 				uint64_t seq = pipeline->execute(frameInfo->layers[0].tex, &frameInfo->layers[0].tex);

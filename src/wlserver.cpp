@@ -20,6 +20,7 @@
 #include "WaylandServer/WaylandProtocol.h"
 #include "WaylandServer/LinuxDrmSyncobj.h"
 #include "WaylandServer/Reshade.h"
+#include "WaylandServer/GamescopeActionBinding.h"
 
 #include "wlr_begin.hpp"
 #include <wlr/backend.h>
@@ -32,6 +33,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_touch.h>
@@ -56,6 +58,7 @@
 #include "hdmi.h"
 #include "main.hpp"
 #include "steamcompmgr.hpp"
+#include "color_helpers.h"
 #include "log.hpp"
 #include "ime.hpp"
 #include "xwayland_ctx.hpp"
@@ -108,6 +111,9 @@ static void wlserver_update_cursor_constraint();
 static void handle_pointer_constraint(struct wl_listener *listener, void *data);
 static void wlserver_constrain_cursor( struct wlr_pointer_constraint_v1 *pNewConstraint );
 struct wlr_surface *wlserver_surface_to_main_surface( struct wlr_surface *pSurface );
+bool wlserver_process_hotkeys( wlr_keyboard *keyboard, uint32_t key, bool press );
+
+extern std::atomic<bool> hasRepaint;
 
 std::vector<ResListEntry_t>& gamescope_xwayland_server_t::retrieve_commits()
 {
@@ -282,21 +288,21 @@ static void bump_input_counter()
 
 static void wlserver_handle_modifiers(struct wl_listener *listener, void *data)
 {
-	struct wlserver_keyboard *keyboard = wl_container_of( listener, keyboard, modifiers );
+	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
 
-	wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard->wlr );
-	wlr_seat_keyboard_notify_modifiers( wlserver.wlr.seat, &keyboard->wlr->modifiers );
+	wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
+	wlr_seat_keyboard_notify_modifiers( wlserver.wlr.seat, &keyboard->modifiers );
 
 	bump_input_counter();
 }
 
 static void wlserver_handle_key(struct wl_listener *listener, void *data)
 {
-	struct wlserver_keyboard *keyboard = wl_container_of( listener, keyboard, key );
+	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
 	struct wlr_keyboard_key_event *event = (struct wlr_keyboard_key_event *) data;
 
 	xkb_keycode_t keycode = event->keycode + 8;
-	xkb_keysym_t keysym = xkb_state_key_get_one_sym(keyboard->wlr->xkb_state, keycode);
+	xkb_keysym_t keysym = xkb_state_key_get_one_sym(keyboard->xkb_state, keycode);
 
 #if HAVE_SESSION
 	if (wlserver.wlr.session && event->state == WL_KEYBOARD_KEY_STATE_PRESSED && keysym >= XKB_KEY_XF86Switch_VT_1 && keysym <= XKB_KEY_XF86Switch_VT_12) {
@@ -306,6 +312,9 @@ static void wlserver_handle_key(struct wl_listener *listener, void *data)
 	}
 #endif
 
+	// TODO: Remove the below hack when Steam is shipping
+	// `gamescope_action_binding_manager` in Steam Stable
+	// as it can just use a keybind to grab these always.
 	bool forbidden_key =
 		keysym == XKB_KEY_XF86AudioLowerVolume ||
 		keysym == XKB_KEY_XF86AudioRaiseVolume ||
@@ -318,15 +327,18 @@ static void wlserver_handle_key(struct wl_listener *listener, void *data)
 		if ( new_kb_surf )
 		{
 			wlserver_keyboardfocus( new_kb_surf, false );
-			wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard->wlr );
+			wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
 			wlr_seat_keyboard_notify_key( wlserver.wlr.seat, event->time_msec, event->keycode, event->state );
 			wlserver_keyboardfocus( old_kb_surf, false );
 			return;
 		}
 	}
-
-	wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard->wlr );
-	wlr_seat_keyboard_notify_key( wlserver.wlr.seat, event->time_msec, event->keycode, event->state );
+	
+	if ( !wlserver_process_hotkeys( keyboard, event->keycode, event->state == WL_KEYBOARD_KEY_STATE_PRESSED ) )
+	{
+		wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
+		wlr_seat_keyboard_notify_key( wlserver.wlr.seat, event->time_msec, event->keycode, event->state );
+	}
 
 	bump_input_counter();
 }
@@ -434,32 +446,21 @@ static void wlserver_new_input(struct wl_listener *listener, void *data)
 	{
 		case WLR_INPUT_DEVICE_KEYBOARD:
 		{
-			struct wlserver_keyboard *keyboard = (struct wlserver_keyboard *) calloc( 1, sizeof( struct wlserver_keyboard ) );
-
-			keyboard->wlr = (struct wlr_keyboard *)device;
-
-			struct xkb_rule_names rules = { 0 };
-			struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-			rules.rules = getenv("XKB_DEFAULT_RULES");
-			rules.model = getenv("XKB_DEFAULT_MODEL");
-			rules.layout = getenv("XKB_DEFAULT_LAYOUT");
-			rules.variant = getenv("XKB_DEFAULT_VARIANT");
-			rules.options = getenv("XKB_DEFAULT_OPTIONS");
-			struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, &rules,
-															   XKB_KEYMAP_COMPILE_NO_FLAGS);
-
-			wlr_keyboard_set_keymap(keyboard->wlr, keymap);
-			xkb_keymap_unref(keymap);
-			xkb_context_unref(context);
-			wlr_keyboard_set_repeat_info(keyboard->wlr, 25, 600);
-
-			keyboard->wlr->data = keyboard;
-
-			keyboard->modifiers.notify = wlserver_handle_modifiers;
-			wl_signal_add( &keyboard->wlr->events.modifiers, &keyboard->modifiers );
-
-			keyboard->key.notify = wlserver_handle_key;
-			wl_signal_add( &keyboard->wlr->events.key, &keyboard->key );
+			struct wlr_keyboard *keyboard = wlr_keyboard_from_input_device(device);
+			wlr_keyboard_set_keymap(keyboard, wlserver.keyboard_group->keyboard.keymap);
+			if (!wlr_keyboard_group_add_keyboard(wlserver.keyboard_group, keyboard)) {
+				wl_log.errorf("failed to add physical keyboard %s", device->name);
+				break;
+			}
+			// Sync the state of the modifiers and the state of the LEDs
+			struct wlr_keyboard_modifiers mods = wlserver.keyboard_group->keyboard.modifiers;
+			if (mods.depressed != keyboard->modifiers.depressed ||
+				mods.latched != keyboard->modifiers.latched ||
+				mods.locked != keyboard->modifiers.locked ||
+				mods.group != keyboard->modifiers.group) {
+				wlr_keyboard_notify_modifiers(keyboard,
+					mods.depressed, mods.latched, mods.locked, mods.group);
+			}
 		}
 		break;
 		case WLR_INPUT_DEVICE_POINTER:
@@ -840,7 +841,8 @@ static void gamescope_swapchain_swapchain_feedback( struct wl_client *client, st
 	uint32_t vk_colorspace,
 	uint32_t vk_composite_alpha,
 	uint32_t vk_pre_transform,
-	uint32_t vk_clipped)
+	uint32_t vk_clipped,
+	const char *vk_engine_name)
 {
 	wlserver_wl_surface_info *wl_info = (wlserver_wl_surface_info *)wl_resource_get_user_data( resource );
 	if ( wl_info )
@@ -852,6 +854,7 @@ static void gamescope_swapchain_swapchain_feedback( struct wl_client *client, st
 			.vk_composite_alpha = VkCompositeAlphaFlagBitsKHR(vk_composite_alpha),
 			.vk_pre_transform = VkSurfaceTransformFlagBitsKHR(vk_pre_transform),
 			.vk_clipped = VkBool32(vk_clipped),
+			.vk_engine_name = std::make_shared<std::string>(vk_engine_name),
 			.hdr_metadata_blob = nullptr,
 		});
 	}
@@ -1042,6 +1045,134 @@ static void gamescope_control_take_screenshot( struct wl_client *client, struct 
 	} );
 }
 
+void drm_sleep_screen( gamescope::GamescopeScreenType eType, bool bSleep );
+
+static void gamescope_control_display_sleep( struct wl_client *client, struct wl_resource *resource, uint32_t display_type_flags, uint32_t flags )
+{
+	if ( flags & ( GAMESCOPE_CONTROL_DISPLAY_SLEEP_FLAGS_SLEEP | GAMESCOPE_CONTROL_DISPLAY_SLEEP_FLAGS_WAKE ) )
+	{
+		const bool sleep = !!( flags & GAMESCOPE_CONTROL_DISPLAY_SLEEP_FLAGS_SLEEP );
+		if ( display_type_flags & GAMESCOPE_CONTROL_DISPLAY_TYPE_FLAGS_EXTERNAL_DISPLAY )
+			drm_sleep_screen( gamescope::GAMESCOPE_SCREEN_TYPE_EXTERNAL, sleep );
+
+		if ( display_type_flags & GAMESCOPE_CONTROL_DISPLAY_TYPE_FLAGS_INTERNAL_DISPLAY )
+			drm_sleep_screen( gamescope::GAMESCOPE_SCREEN_TYPE_INTERNAL, sleep );
+	}
+}
+
+extern gamescope::ConVar<bool> cv_overlay_unmultiplied_alpha;
+extern std::atomic<std::shared_ptr<lut3d_t>> g_ColorMgmtLooks[EOTF_Count];
+
+static gamescope::ConCommand cc_set_look("set_look", "Set a look for a specific EOTF. Eg. set_look mylook.cube (g22 only), set_look pq mylook.cube, set_look mylook_g22.cube mylook_pq.cube",
+[]( std::span<std::string_view> args )
+{
+	if ( args.size() == 2 )
+	{
+		std::string arg1 = std::string{ args[1] };
+		bool bRaisesBlackLevelFloor = false;
+		g_ColorMgmtLooks[ EOTF_Gamma22 ] = LoadCubeLut( arg1.c_str(), bRaisesBlackLevelFloor );
+		cv_overlay_unmultiplied_alpha = bRaisesBlackLevelFloor;
+		g_ColorMgmt.pending.externalDirtyCtr++;
+		hasRepaint = true;
+	}
+	else if ( args.size() == 3 )
+	{
+		std::string arg2 = std::string{ args[2] };
+
+		bool bRaisesBlackLevelFloor = false;
+		if ( args[1] == "g22" || args[1] == "G22")
+		{
+			g_ColorMgmtLooks[ EOTF_Gamma22 ] = LoadCubeLut( arg2.c_str(), bRaisesBlackLevelFloor );
+		}
+		else if ( args[1] == "pq" || args[1] == "PQ" )
+		{
+			g_ColorMgmtLooks[ EOTF_PQ ] = LoadCubeLut( arg2.c_str(), bRaisesBlackLevelFloor );
+		}
+		else
+		{
+			std::string arg1 = std::string{ args[1] };
+
+			std::shared_ptr<lut3d_t> pG22LUT;
+			std::shared_ptr<lut3d_t> pPQLUT;
+
+			bool bDummy = false;
+			pG22LUT = LoadCubeLut( arg1.c_str(), bRaisesBlackLevelFloor );
+			pPQLUT = LoadCubeLut( arg2.c_str(), bDummy );
+
+			g_ColorMgmtLooks[ EOTF_Gamma22 ] = pG22LUT;
+			g_ColorMgmtLooks[ EOTF_PQ ] = pPQLUT;
+		}
+		cv_overlay_unmultiplied_alpha = bRaisesBlackLevelFloor;
+		g_ColorMgmt.pending.externalDirtyCtr++;
+		hasRepaint = true;
+	}
+	else
+	{
+		cv_overlay_unmultiplied_alpha = false;
+		g_ColorMgmtLooks[ EOTF_Gamma22 ] = nullptr;
+		g_ColorMgmtLooks[ EOTF_PQ ] = nullptr;
+		g_ColorMgmt.pending.externalDirtyCtr++;
+		hasRepaint = true;
+	}
+});
+
+static void gamescope_control_set_look( struct wl_client *client, struct wl_resource *resource, int g22_fd, int pq_fd, uint32_t flags )
+{
+	std::shared_ptr<lut3d_t> pG22LUT;
+	std::shared_ptr<lut3d_t> pPQLUT;
+	bool bRaisesBlackLevelFloor = false;
+
+	if ( g22_fd >= 0 )
+	{
+		// takes ownership of FD.
+		FILE *pG22 = fdopen( g22_fd, "r" );
+		if ( pG22 )
+		{
+			pG22LUT = LoadCubeLut( pG22, bRaisesBlackLevelFloor );
+			fclose( pG22 );
+		}
+		else
+		{
+			wl_log.errorf_errno( "gamescope_control_set_look error opening g22 lut" );
+			close( g22_fd );
+		}
+		g22_fd = -1;
+	}
+
+	if ( pq_fd >= 0 )
+	{
+		// takes ownership of FD.
+		FILE *pPQ = fdopen( pq_fd, "r" );
+		if ( pPQ )
+		{
+			bool bDummy = false;
+			pPQLUT = LoadCubeLut( pPQ, bDummy );
+			fclose( pPQ );
+		}
+		else
+		{
+			wl_log.errorf_errno( "gamescope_control_set_look error opening pq lut" );
+			close( pq_fd );
+		}
+		pq_fd = -1;
+	}
+
+	cv_overlay_unmultiplied_alpha = bRaisesBlackLevelFloor;
+	g_ColorMgmtLooks[ EOTF_Gamma22 ] = pG22LUT;
+	g_ColorMgmtLooks[ EOTF_PQ ] = pPQLUT;
+	g_ColorMgmt.pending.externalDirtyCtr++;
+	hasRepaint = true;
+}
+
+static void gamescope_control_unset_look( struct wl_client *client, struct wl_resource *resource )
+{
+	cv_overlay_unmultiplied_alpha = false;
+	g_ColorMgmtLooks[ EOTF_Gamma22 ] = nullptr;
+	g_ColorMgmtLooks[ EOTF_PQ ] = nullptr;
+	g_ColorMgmt.pending.externalDirtyCtr++;
+	hasRepaint = true;
+}
+
 static void gamescope_control_handle_destroy( struct wl_client *client, struct wl_resource *resource )
 {
 	wl_resource_destroy( resource );
@@ -1051,6 +1182,9 @@ static const struct gamescope_control_interface gamescope_control_impl = {
 	.destroy = gamescope_control_handle_destroy,
 	.set_app_target_refresh_cycle = gamescope_control_set_app_target_refresh_cycle,
 	.take_screenshot = gamescope_control_take_screenshot,
+	.display_sleep = gamescope_control_display_sleep,
+	.set_look = gamescope_control_set_look,
+	.unset_look = gamescope_control_unset_look,
 };
 
 static uint32_t get_conn_display_info_flags()
@@ -1115,6 +1249,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_PIXEL_FILTER, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_REFRESH_CYCLE_ONLY_CHANGE_REFRESH_RATE, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_MURA_CORRECTION, 1, 0 );
+	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_LOOK, 1, 0 );
 	gamescope_control_send_feature_support( resource, GAMESCOPE_CONTROL_FEATURE_DONE, 0, 0 );
 
 	wlserver_send_gamescope_control( resource );
@@ -1124,7 +1259,7 @@ static void gamescope_control_bind( struct wl_client *client, void *data, uint32
 
 static void create_gamescope_control( void )
 {
-	uint32_t version = 3;
+	uint32_t version = 5;
 	wl_global_create( wlserver.display, &gamescope_control_interface, version, NULL, gamescope_control_bind );
 }
 
@@ -1340,8 +1475,7 @@ bool wlsession_active()
 
 static void handle_session_active( struct wl_listener *listener, void *data )
 {
-	if (wlserver.wlr.session->active)
-		GetBackend()->DirtyState( true, true );
+	GetBackend()->DirtyState( wlserver.wlr.session->active, wlserver.wlr.session->active );
 	wl_log.infof( "Session %s", wlserver.wlr.session->active ? "resumed" : "paused" );
 }
 #endif
@@ -1733,8 +1867,26 @@ bool wlserver_init( void ) {
 	// We need to wait for the backend to be started before adding the device
 	struct wlr_keyboard *kbd = (struct wlr_keyboard *) calloc(1, sizeof(*kbd));
 	wlr_keyboard_init(kbd, nullptr, "virtual");
-
 	wlserver.wlr.virtual_keyboard_device = kbd;
+
+	// Create a keyboard group to keep all externally connected keyboards
+	// in sync (one single layout and a shared state)
+	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	struct xkb_rule_names rules = { 0 };
+	rules.rules = getenv("XKB_DEFAULT_RULES");
+	rules.model = getenv("XKB_DEFAULT_MODEL");
+	rules.layout = getenv("XKB_DEFAULT_LAYOUT");
+	rules.variant = getenv("XKB_DEFAULT_VARIANT");
+	rules.options = getenv("XKB_DEFAULT_OPTIONS");
+	struct xkb_keymap *keymap = xkb_keymap_new_from_names(context, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	wlserver.keyboard_group = wlr_keyboard_group_create();
+	struct wlr_keyboard *keyboard = &wlserver.keyboard_group->keyboard;
+	wlr_keyboard_set_repeat_info(keyboard, 25, 600);
+	wlr_keyboard_set_keymap(keyboard, keymap);
+	wlserver.keyboard_group_modifiers.notify = wlserver_handle_modifiers;
+	wl_signal_add(&keyboard->events.modifiers, &wlserver.keyboard_group_modifiers);
+	wlserver.keyboard_group_key.notify = wlserver_handle_key;
+	wl_signal_add(&keyboard->events.key, &wlserver.keyboard_group_key);
 
 	wlserver.wlr.renderer = vulkan_renderer_create();
 
@@ -1747,6 +1899,8 @@ bool wlserver_init( void ) {
 	create_ime_manager( &wlserver );
 
 	create_reshade();
+
+	new gamescope::WaylandServer::CGamescopeActionBindingProtocol( wlserver.display );
 
 	create_gamescope_xwayland();
 
@@ -1844,9 +1998,11 @@ bool wlserver_init( void ) {
 		char szEISocket[ 64 ];
 		snprintf( szEISocket, sizeof( szEISocket ), "%s-ei", wlserver.wl_display_name );
 
-		g_InputServer = std::make_unique<gamescope::GamescopeInputServer>();
-		if ( g_InputServer->Init( szEISocket ) )
+		std::unique_ptr<gamescope::GamescopeInputServer> pInputServer = std::make_unique<gamescope::GamescopeInputServer>();
+		if ( pInputServer->Init( szEISocket ) )
 		{
+			g_InputServer = std::move( pInputServer );
+
 			setenv( "LIBEI_SOCKET", szEISocket, 1 );
 			g_LibEisWaiter.AddWaitable( g_InputServer.get() );
 			wl_log.infof( "Successfully initialized libei for input emulation!" );
@@ -1956,6 +2112,7 @@ void wlserver_run(void)
 			wl_display_flush_clients(wlserver.display);
 			int ret = wl_event_loop_dispatch(wlserver.event_loop, 0);
 			if (ret < 0) {
+				wlserver_unlock();
 				break;
 			}
 
@@ -2037,18 +2194,72 @@ void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain )
 	}
 }
 
+bool wlserver_process_hotkeys( wlr_keyboard *keyboard, uint32_t key, bool press )
+{
+	xkb_keycode_t keycode = key + 8;
+	xkb_keysym_t keysym = xkb_state_key_get_one_sym( keyboard->xkb_state, keycode );
+
+	keysym = NormalizeKeysymForHotkey( keysym );
+
+	static std::unordered_set<xkb_keysym_t> s_setPressedKeySyms;
+	if ( press )
+	{
+		s_setPressedKeySyms.emplace( keysym );
+	}
+	else
+	{
+		s_setPressedKeySyms.erase( keysym );
+	}
+
+	if ( log_binding.Enabled( LOG_DEBUG ) )
+	{
+		std::string sPressedKeySymsDebugName = ComputeDebugName( s_setPressedKeySyms );
+		log_binding.debugf( "Looking for: [%s].", sPressedKeySymsDebugName.c_str() );
+	}
+
+	{
+		using namespace gamescope::WaylandServer;
+
+		std::span<CGamescopeActionBinding *> ppBindings = CGamescopeActionBinding::GetBindings();
+
+		for ( CGamescopeActionBinding *pBinding : ppBindings )
+		{
+			if ( !pBinding->IsArmed() )
+				continue;
+
+			std::span<Keybind_t> pKeybinds = pBinding->GetKeyboardTriggers();
+			for ( const Keybind_t &keybind : pKeybinds )
+			{
+				if ( !pBinding->IsArmed() )
+					break;
+
+				if ( s_setPressedKeySyms != keybind.setKeySyms )
+					continue;
+
+				if ( pBinding->Execute() )
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 void wlserver_key( uint32_t key, bool press, uint32_t time )
 {
 	assert( wlserver_is_lock_held() );
 
-	assert( wlserver.wlr.virtual_keyboard_device != nullptr );
-	wlr_seat_set_keyboard( wlserver.wlr.seat, wlserver.wlr.virtual_keyboard_device );
-	wlr_seat_keyboard_notify_key( wlserver.wlr.seat, time, key, press );
+	wlr_keyboard *keyboard = wlserver.wlr.virtual_keyboard_device;
+
+	if ( !wlserver_process_hotkeys( keyboard, key, press ) )
+	{
+		assert( keyboard != nullptr );
+		wlr_seat_set_keyboard( wlserver.wlr.seat, keyboard );
+		wlr_seat_keyboard_notify_key( wlserver.wlr.seat, time, key, press );
+	}
 
 	bump_input_counter();
 }
-
-extern std::atomic<bool> hasRepaint;
 
 struct wlr_surface *wlserver_surface_to_main_surface( struct wlr_surface *pSurface )
 {
@@ -2203,9 +2414,35 @@ static void wlserver_warp_to_constraint_hint()
 		double sx = pConstraint->current.cursor_hint.x;
 		double sy = pConstraint->current.cursor_hint.y;
 
+		if ( wlserver.mouse_surface_cursorx == sx && wlserver.mouse_surface_cursory == sy )
+			return;
+
 		wlserver.mouse_surface_cursorx = sx;
 		wlserver.mouse_surface_cursory = sy;
 		wlr_seat_pointer_warp( wlserver.wlr.seat, sx, sy );
+
+		uint64_t ulNow = get_time_in_nanos();
+		static uint32_t s_unSyntheticMoveCount = 0;
+
+		// Add a heuristic for whether the cursor is continually moving, or if
+		// this is just a simple warp to the saame place.
+		bool bSynthetic = true;
+		if ( wlserver.ulLastMovedCursorTime + 200'000'000 >= ulNow )
+		{
+			if ( s_unSyntheticMoveCount++ >= 3 )
+			{
+				bSynthetic = false;
+			}
+		}
+		else
+		{
+			s_unSyntheticMoveCount = 0;
+		}
+
+		wlserver.ulLastMovedCursorTime = ulNow;
+
+		if ( !bSynthetic )
+			wlserver.bCursorHidden = !wlserver.bCursorHasImage;
 	}
 }
 

@@ -1,0 +1,38 @@
+diff --git a/src/log.cpp b/src/log.cpp
+index 7b502a4..e9397bb 100644
+--- a/src/log.cpp
++++ b/src/log.cpp
+@@ -3,8 +3,6 @@
+ #include <cstring>
+ #include <cerrno>
+ 
+-#include <format>
+-
+ #include "Utils/Process.h"
+ #include "Utils/Defer.h"
+ #include "convar.h"
+@@ -50,11 +48,22 @@ static constexpr LogPriority GetPriorityFromString( std::string_view psvScope )
+ 		return LOG_INFO;
+ }
+ 
++auto format = [](std::string s, std::string_view sv) -> std::string {
++	std::size_t pos = s.find("{}");
++    if (pos == std::string::npos)
++		return s;
++    return s.replace(pos, std::string("{}").length(), sv);
++};
++
+ struct LogConVar_t
+ {
+ 	LogConVar_t( LogScope *pScope, std::string_view psvName, LogPriority eDefaultPriority )
+-		: sName{ std::format( "log_{}", psvName ) }
+-		, sDescription{ std::format( "Max logging priority for the {} channel. Valid options are: [ silent, error, warning, debug, info ].", psvName ) }
++		: sName{
++			format( "log_{}", psvName )
++		}
++		, sDescription{
++			format( "Max logging priority for the {} channel. Valid options are: [ silent, error, warning, debug, info ].", psvName ) 
++		}
+ 		, convar
+ 		{ sName, std::string( GetLogName( eDefaultPriority ) ), sDescription,
+ 			[ pScope ]( gamescope::ConVar<std::string> &cvar )
