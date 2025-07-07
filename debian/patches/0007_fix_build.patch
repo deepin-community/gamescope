@@ -3,15 +3,16 @@ Author: Safir Secerovic <sapphire@linux.org.ba>
 Forwarded: not-needed
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,8 @@
  
  drm_dep = dependency('libdrm', version: '>= 2.4.113', required: get_option('drm_backend'))
  eis_dep = dependency('libeis-1.0', required : get_option('input_emulation'))
 +pixman_dep = dependency('pixman-1')
++libudev_dep = dependency('libudev')
  
- wayland_server = dependency('wayland-server', version: '>=1.21')
- wayland_protos = dependency('wayland-protocols', version: '>=1.17')
-@@ -172,12 +173,7 @@
+ libsystemd_dep = dependency('libsystemd', required : false)
+ 
+@@ -175,12 +177,7 @@
  compiler_name = cc.get_id()
  compiler_version = cc.version()
  
@@ -24,12 +25,26 @@ Forwarded: not-needed
  
  gamescope_version = configure_file(
    input : 'GamescopeVersion.h.in',
-@@ -195,7 +191,7 @@
-       xkbcommon, thread_dep, sdl2_dep, wlroots_dep,
+@@ -199,6 +196,7 @@
        vulkan_dep, liftoff_dep, dep_xtst, dep_xmu, cap_dep, epoll_dep, pipewire_dep, librt_dep,
        stb_dep, displayinfo_dep, openvr_dep, dep_xcursor, avif_dep, dep_xi,
--      libdecor_dep, eis_dep, luajit_dep
-+      libdecor_dep, eis_dep, luajit_dep, pixman_dep
+       libdecor_dep, eis_dep, luajit_dep, libinput_dep, libsystemd_dep,
++      pixman_dep, libudev_dep,
      ],
      install: true,
      cpp_args: gamescope_cpp_args,
+--- a/meson.build
++++ b/meson.build
+@@ -46,10 +46,8 @@
+ dep_wayland = dependency('wayland-client')
+ vulkan_dep = dependency('vulkan')
+ 
+-glm_proj = subproject('glm')
+-glm_dep = glm_proj.get_variable('glm_dep')
+-stb_proj = subproject('stb')
+-stb_dep = stb_proj.get_variable('stb_dep')
++glm_dep = dependency('glm')
++stb_dep = dependency('stb')
+ 
+ if get_option('enable_openvr_support')
+   openvr_dep = dependency('openvr', version: '>= 2.7', required : false)

@@ -1,3 +1,21 @@
+gamescope (3.16.14-1deepin1) unstable; urgency=medium
+
+  * Desuger std::format
+
+ -- Cryolitia <cryolitia@deepin.org>  Mon, 07 Jul 2025 15:49:28 +0800
+
+gamescope (3.16.14-1) unstable; urgency=medium
+
+  * New upstream version 3.16.14 (Closes: bug#1104410)
+  * Add libudev-dev dependency
+  * Remove duplicate dependencies
+  * Change glm and stb from subproject to dependency
+  * Update upstream links
+  * Standards-Version: 4.7.2
+  * Update some licenses in copyright
+
+ -- Ilya Orlov <ilyaorlov124@gmail.com>  Sat, 05 Jul 2025 01:45:13 +0500
+
 gamescope (3.16.1-1) unstable; urgency=medium
 
   * Team Upload

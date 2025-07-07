@@ -116,6 +116,12 @@ struct steamcompmgr_win_t {
 	uint32_t appID = 0;
 	bool isOverlay = false;
 	bool isExternalOverlay = false;
+
+	bool IsAnyOverlay() const
+	{
+		return isOverlay || isExternalOverlay;
+	}
+
 	bool isFullscreen = false;
 	bool isSysTrayIcon = false;
 	bool sizeHintsSpecified = false;
@@ -126,6 +132,8 @@ struct steamcompmgr_win_t {
 	bool is_dialog = false;
 	bool maybe_a_dropdown = false;
 	bool outdatedInteractiveFocus = false;
+
+	uint64_t last_commit_first_latch_time = 0;
 
 	bool hasHwndStyle = false;
 	uint32_t hwndStyle = 0;
@@ -139,6 +147,8 @@ struct steamcompmgr_win_t {
 
 	bool unlockedForFrameCallback = false;
 	bool receivedDoneCommit = false;
+
+	std::shared_ptr<std::string> engineName;
 
 	std::vector< gamescope::Rc<commit_t> > commit_queue;
 	std::shared_ptr<std::vector< uint32_t >> icon;
@@ -208,6 +218,21 @@ struct steamcompmgr_win_t {
 			return xwayland().surface.override_surface;
 		else
 			return nullptr;
+	}
+
+	gamescope::VirtualConnectorKey_t GetVirtualConnectorKey( gamescope::VirtualConnectorStrategy eStrategy )
+	{
+		switch ( eStrategy )
+		{
+		default:
+		case gamescope::VirtualConnectorStrategies::SingleApplication:
+		case gamescope::VirtualConnectorStrategies::SteamControlled:
+			return 0;
+		case gamescope::VirtualConnectorStrategies::PerAppId:
+			return static_cast<gamescope::VirtualConnectorKey_t>( this->appID );
+		case gamescope::VirtualConnectorStrategies::PerWindow:
+			return static_cast<gamescope::VirtualConnectorKey_t>( this->seq );
+		}
 	}
 };
 

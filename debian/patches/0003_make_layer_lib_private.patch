@@ -4,9 +4,9 @@ Forwarded: https://github.com/ValveSoftware/gamescope/pull/913
 
 --- a/layer/meson.build
 +++ b/layer/meson.build
-@@ -3,13 +3,13 @@
+@@ -2,13 +2,13 @@
+ dep_xcb = dependency('xcb')
  dep_x11_xcb = dependency('x11-xcb')
- glm_dep = dependency('glm')
  wayland_client = dependency('wayland-client')
 +out_lib_dir = join_paths(prefix, lib_dir, 'gamescope')
  
